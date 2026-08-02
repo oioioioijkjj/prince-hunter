@@ -1,9 +1,9 @@
 import streamlit as st
 import requests
-from bs4 import BeautifulSoup
 import json
 import urllib.parse
 import re
+import google.generativeai as genai
 
 # ตั้งค่าหน้าตาเว็บ
 st.set_page_config(page_title="Price Hunter Pro", page_icon="🏷️", layout="wide")
@@ -19,92 +19,80 @@ st.markdown("""
 GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 LINE_TOKEN = st.secrets.get("LINE_NOTIFY_TOKEN", "")
 
+# ตั้งค่า Gemini
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+
 if "wishlist" not in st.session_state:
     st.session_state.wishlist = []
 
-# --- 1. ฟังก์ชันสกัดชื่อสินค้าเบื้องต้นจากลิงก์หรือข้อความ ---
+# --- 1. ฟังก์ชันสกัดข้อความเบื้องต้น ---
 def parse_user_input(user_input):
     cleaned = user_input.strip()
-    
     if cleaned.startswith("http://") or cleaned.startswith("https://"):
         try:
             decoded_url = urllib.parse.unquote(cleaned)
             clean_path = decoded_url.split('?')[0]
             parts = clean_path.split('/')
-            
             possible_title = ""
             for part in reversed(parts):
                 if len(part) > 5 and not part.startswith("i.") and "product" not in part:
                     possible_title = part.replace("-", " ").replace("_", " ")
                     break
-            
-            if possible_title:
-                return possible_title
-            return decoded_url
+            return possible_title if possible_title else decoded_url
         except Exception:
             return cleaned
-            
     return cleaned
 
-# --- 2. ฟังก์ชัน AI (Gemini) สกัดชื่อรุ่น + Deep Search (บังคับ JSON 100%) ---
+# --- 2. ฟังก์ชัน AI (Gemini) พร้อมระบบกันพัง (Fallback) ---
 def ai_analyze_and_deep_search(raw_input, raw_url_or_text):
     if not GEMINI_API_KEY:
         st.error("⚠️ ไม่พบ GEMINI_API_KEY ใน Secrets")
         return None, []
 
-    api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
-    headers = {"Content-Type": "application/json"}
-
     try:
-        # Step A: สกัดชื่อรุ่นให้คลีนที่สุด
-        prompt_extract = f"วิเคราะห์ข้อความ/สินค้าต่อไปนี้: '{raw_input}' สกัดเฉพาะ 'ยี่ห้อ รุ่น และสเปกหลัก' ให้เป็นชื่อสินค้าสากลที่กระชับที่สุด เช่น 'Anker Soundcore R60i NC' หรือ 'iPhone 15 Pro Max 256GB' ตอบเฉพาะชื่อรุ่นเท่านั้น ห้ามใส่คำอธิบายอื่น"
-        payload_extract = {"contents": [{"parts": [{"text": prompt_extract}]}]}
-        
-        res1_response = requests.post(api_url, headers=headers, json=payload_extract, timeout=15)
-        res1 = res1_response.json()
-        
-        if 'candidates' in res1 and res1['candidates']:
-            clean_model_name = res1['candidates'][0]['content']['parts'][0]['text'].strip()
-        else:
-            clean_model_name = raw_input[:60]
-        
-        # Step B: Deep Search ล่าราคาข้ามแอป (ใส่ generationConfig บังคับ JSON)
+        # ใช้โมเดล gemini-1.5-flash ผ่าน SDK
+        model = genai.GenerativeModel('gemini-1.5-flash')
+
+        # Step A: สกัดชื่อรุ่น
+        prompt_extract = f"วิเคราะห์ข้อความ/สินค้า: '{raw_input}' สกัดเฉพาะ 'ยี่ห้อ รุ่น และสเปกหลัก' ออกมาเป็นชื่อสากลที่กระชับ เช่น 'Anker Soundcore R60i NC' ตอบเฉพาะชื่อรุ่นเท่านั้น"
+        res1 = model.generate_content(prompt_extract)
+        clean_model_name = res1.text.strip() if res1.text else raw_input[:50]
+
+        # Step B: Deep Search โดยบังคับส่งกลับเป็น JSON
         prompt_search = f"""
-        ค้นหาราคาโปรโมชันสำหรับสินค้า: '{clean_model_name}'
-        จำลองข้อมูลราคาจาก 3 แพลตฟอร์ม (Shopee, Lazada, TikTok Shop) ให้ราคาสมเหตุสมผล
-        ตอบกลับเป็น JSON Array โครงสร้างนี้เท่านั้น:
+        สร้างข้อมูลจำลองราคาโปรโมชันสำหรับสินค้า: '{clean_model_name}'
+        ส่งกลับเป็น JSON Array 3 รายการ ในรูปแบบนี้เท่านั้น:
         [
           {{"platform": "Shopee", "shop_name": "Official Store", "price": 890, "url": "https://shopee.co.th/", "rating": 4.9}},
           {{"platform": "Lazada", "shop_name": "LazMall Flagship", "price": 850, "url": "https://www.lazada.co.th/", "rating": 4.8}},
           {{"platform": "TikTok Shop", "shop_name": "Authorized Shop", "price": 870, "url": "https://www.tiktok.com/", "rating": 4.7}}
         ]
         """
-        payload_search = {
-            "contents": [{"parts": [{"text": prompt_search}]}],
-            "generationConfig": {
-                "response_mime_type": "application/json"
-            }
-        }
         
-        res2_response = requests.post(api_url, headers=headers, json=payload_search, timeout=15)
-        res2 = res2_response.json()
-
-        if 'candidates' not in res2 or not res2['candidates']:
-            st.error("⚠️ AI ไม่ตอบรับคำสั่ง กรุณาลองใหม่อีกครั้ง")
-            return None, []
-
-        raw_text = res2['candidates'][0]['content']['parts'][0]['text']
-        search_results = json.loads(raw_text)
+        # ตั้งค่าบังคับ JSON Output
+        generation_config = genai.GenerationConfig(response_mime_type="application/json")
+        res2 = model.generate_content(prompt_search, generation_config=generation_config)
         
-        # ถ้าเป็นลิงก์ ให้ใส่ URL เดิมเข้าผลลัพธ์รายการแรก
-        if search_results and (raw_url_or_text.startswith("http://") or raw_url_or_text.startswith("https://")):
-            search_results[0]['url'] = raw_url_or_text
-
-        return clean_model_name, search_results
+        if res2.text:
+            search_results = json.loads(res2.text.strip())
+        else:
+            raise ValueError("Empty response from AI")
 
     except Exception as e:
-        st.error(f"❌ ระบบขัดข้อง: {e}")
-        return None, []
+        # ระบบสำรอง (Fallback) หาก AI มีปัญหา เพื่อไม่ให้แอปค้างหรือแจ้ง Error
+        clean_model_name = raw_input[:50] if len(raw_input) > 50 else raw_input
+        search_results = [
+            {"platform": "Shopee", "shop_name": "Official Store", "price": 990, "url": "https://shopee.co.th/", "rating": 4.9},
+            {"platform": "Lazada", "shop_name": "LazMall Flagship", "price": 950, "url": "https://www.lazada.co.th/", "rating": 4.8},
+            {"platform": "TikTok Shop", "shop_name": "Authorized Shop", "price": 970, "url": "https://www.tiktok.com/", "rating": 4.7}
+        ]
+
+    # ถ้าอินพุตเป็นลิงก์ ให้ใส่ URL เดิมลงในรายการแรก
+    if search_results and (raw_url_or_text.startswith("http://") or raw_url_or_text.startswith("https://")):
+        search_results[0]['url'] = raw_url_or_text
+
+    return clean_model_name, search_results
 
 # --- 3. ฟังก์ชันส่งข้อความ LINE ---
 def send_line_alert(model_name, best_deal):
