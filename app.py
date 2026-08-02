@@ -26,15 +26,12 @@ if "wishlist" not in st.session_state:
 def parse_user_input(user_input):
     cleaned = user_input.strip()
     
-    # กรณีเป็น URL ให้พยายามถอดความหมายของ URL ออกมา
     if cleaned.startswith("http://") or cleaned.startswith("https://"):
         try:
             decoded_url = urllib.parse.unquote(cleaned)
-            # ตัดพารามิเตอร์ส่วนเกินออก
             clean_path = decoded_url.split('?')[0]
             parts = clean_path.split('/')
             
-            # ค้นหาส่วนที่เป็นชื่อสินค้า
             possible_title = ""
             for part in reversed(parts):
                 if len(part) > 5 and not part.startswith("i.") and "product" not in part:
@@ -47,10 +44,9 @@ def parse_user_input(user_input):
         except Exception:
             return cleaned
             
-    # กรณีพิมพ์ชื่อสินค้ามาตรงๆ
     return cleaned
 
-# --- 2. ฟังก์ชัน AI (Gemini) สกัดชื่อรุ่น + Deep Search ---
+# --- 2. ฟังก์ชัน AI (Gemini) สกัดชื่อรุ่น + Deep Search (บังคับ JSON 100%) ---
 def ai_analyze_and_deep_search(raw_input, raw_url_or_text):
     if not GEMINI_API_KEY:
         st.error("⚠️ ไม่พบ GEMINI_API_KEY ใน Secrets")
@@ -70,37 +66,37 @@ def ai_analyze_and_deep_search(raw_input, raw_url_or_text):
         if 'candidates' in res1 and res1['candidates']:
             clean_model_name = res1['candidates'][0]['content']['parts'][0]['text'].strip()
         else:
-            # ถ้า AI สกัดไม่ได้ ให้ใช้ข้อความเบื้องต้นที่ดึงได้แทน
             clean_model_name = raw_input[:60]
         
-        # Step B: Deep Search ล่าราคาข้ามแอป
+        # Step B: Deep Search ล่าราคาข้ามแอป (ใส่ generationConfig บังคับ JSON)
         prompt_search = f"""
-        คุณคือระบบเปรียบเทียบราคาสินค้า ค้นหาราคาโปรโมชันสำหรับสินค้า: '{clean_model_name}'
-        จำลองข้อมูลราคาจาก 3 แพลตฟอร์ม (Shopee, Lazada, TikTok Shop) ให้ราคาสมเหตุสมผลและสอดคล้องกัน
-        ตอบกลับเป็น JSON Array รูปแบบนี้เท่านั้น (ห้ามใส่คำอธิบายอื่น):
+        ค้นหาราคาโปรโมชันสำหรับสินค้า: '{clean_model_name}'
+        จำลองข้อมูลราคาจาก 3 แพลตฟอร์ม (Shopee, Lazada, TikTok Shop) ให้ราคาสมเหตุสมผล
+        ตอบกลับเป็น JSON Array โครงสร้างนี้เท่านั้น:
         [
           {{"platform": "Shopee", "shop_name": "Official Store", "price": 890, "url": "https://shopee.co.th/", "rating": 4.9}},
           {{"platform": "Lazada", "shop_name": "LazMall Flagship", "price": 850, "url": "https://www.lazada.co.th/", "rating": 4.8}},
           {{"platform": "TikTok Shop", "shop_name": "Authorized Shop", "price": 870, "url": "https://www.tiktok.com/", "rating": 4.7}}
         ]
         """
-        payload_search = {"contents": [{"parts": [{"text": prompt_search}]}]}
+        payload_search = {
+            "contents": [{"parts": [{"text": prompt_search}]}],
+            "generationConfig": {
+                "response_mime_type": "application/json"
+            }
+        }
         
         res2_response = requests.post(api_url, headers=headers, json=payload_search, timeout=15)
         res2 = res2_response.json()
 
         if 'candidates' not in res2 or not res2['candidates']:
-            st.error("⚠️ AI ไม่สามารถคำนวณเปรียบเทียบราคาได้ในขณะนี้")
+            st.error("⚠️ AI ไม่ตอบรับคำสั่ง กรุณาลองใหม่อีกครั้ง")
             return None, []
 
         raw_text = res2['candidates'][0]['content']['parts'][0]['text']
+        search_results = json.loads(raw_text)
         
-        match = re.search(r'\[.*\]', raw_text, re.DOTALL)
-        clean_json = match.group(0) if match else raw_text.strip()
-        
-        search_results = json.loads(clean_json)
-        
-        # ใส่ URL เดิมเข้าผลลัพธ์ถ้าเป็นลิงก์
+        # ถ้าเป็นลิงก์ ให้ใส่ URL เดิมเข้าผลลัพธ์รายการแรก
         if search_results and (raw_url_or_text.startswith("http://") or raw_url_or_text.startswith("https://")):
             search_results[0]['url'] = raw_url_or_text
 
@@ -137,7 +133,7 @@ st.markdown('<p class="sub-title">แปะลิงก์ หรือ พิ�
 st.subheader("1️⃣ ค้นหาสินค้าที่เล็งไว้")
 user_input = st.text_input(
     "วางลิงก์สินค้า หรือ พิมพ์ชื่อรุ่น/ยี่ห้อ ตรงนี้:",
-    placeholder="เช่น https://shopee.co.th/... หรือ Anker Soundcore R60i NC"
+    placeholder="เช่น Anker Soundcore R60i NC หรือ https://shopee.co.th/..."
 )
 
 if st.button("🔍 ดึงข้อมูลสินค้า & AI วิเคราะห์"):
