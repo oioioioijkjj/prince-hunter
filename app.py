@@ -14,7 +14,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # อ่านค่า Secrets
-SERPAPI_KEY = st.secrets.get("SERPAPI_KEY", "")
+SERPAPI_KEY = st.secrets.get("SERPAPI_KEY", st.secrets.get("GEMINI_API_KEY", ""))
 LINE_TOKEN = st.secrets.get("LINE_NOTIFY_TOKEN", "")
 
 if "wishlist" not in st.session_state:
@@ -120,7 +120,7 @@ if 'search_results' in st.session_state:
                 st.image(item['thumbnail'], width=150)
                 st.write(f"**{item['title']}**")
                 st.write(f"🏪 ร้านค้า: **{item['source']}**")
-                st.markdown(f"🏷️ ราคาจริง: <span class='product-price'>{item['price']}</span>", unsafe_unsafe_allow_html=True)
+                st.markdown(f"🏷️ ราคาจริง: <span class='product-price'>{item['price']}</span>", unsafe_allow_html=True)
                 st.markdown(f"[👉 กดตรงนี้เพื่อไปยังหน้าร้านค้า]({item['link']})")
                 
                 if st.button(f"❤️ เล็งรายการนี้", key=f"btn_{idx}"):
