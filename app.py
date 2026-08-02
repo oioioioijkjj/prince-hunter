@@ -54,7 +54,6 @@ def ai_analyze_and_deep_search(raw_title, raw_url):
         return None, []
 
     try:
-        # ใช้โมเดลมาตรฐาน gemini-1.5-flash
         model = genai.GenerativeModel('gemini-1.5-flash')
         
         # Step A: สกัดชื่อรุ่น
@@ -80,4 +79,8 @@ def ai_analyze_and_deep_search(raw_title, raw_url):
         ]
         """
         response_search = model.generate_content(prompt_search)
-        clean_json_text = response_search.text.replace("```json", "").replace("
+        
+        # แก้ไขจุดตัด String ที่สุ่มเสี่ยง SyntaxError
+        clean_json_text = response_search.text.strip()
+        if "```" in clean_json_text:
+            clean_json_text = clean_json_text.split("
