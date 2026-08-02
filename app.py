@@ -26,13 +26,10 @@ if GEMINI_API_KEY:
 if "wishlist" not in st.session_state:
     st.session_state.wishlist = []
 
-# --- 1. ฟังก์ชันดึงรายละเอียดสินค้าจาก URL (แก้ให้รองรับลิงก์ Shopee ภาษาไทย) ---
+# --- 1. ฟังก์ชันดึงรายละเอียดสินค้าจาก URL ---
 def extract_product_details(url):
     try:
-        # ถอดรหัสตัวอักษร %E0%... ให้เป็นข้อความภาษาไทยปกติก่อน
         decoded_url = urllib.parse.unquote(url)
-        
-        # แกะเอาชื่อสินค้าเบื้องต้นจาก URL ของ Shopee/Lazada
         url_parts = decoded_url.split('/')
         possible_title = ""
         for part in url_parts:
@@ -50,14 +47,15 @@ def extract_product_details(url):
     except Exception as e:
         return {"title": url, "original_url": url}
 
-# --- 2. ฟังก์ชัน AI (Gemini) สกัดชื่อรุ่น + Deep Search เสถียรสูง ---
+# --- 2. ฟังก์ชัน AI (Gemini) สกัดชื่อรุ่น + Deep Search ---
 def ai_analyze_and_deep_search(raw_title, raw_url):
     if not GEMINI_API_KEY:
         st.error("⚠️ ไม่พบ GEMINI_API_KEY ใน Secrets")
         return None, []
 
     try:
-        model = genai.GenerativeModel('gemini-2.5-flash')
+        # ใช้โมเดลมาตรฐาน gemini-1.5-flash
+        model = genai.GenerativeModel('gemini-1.5-flash')
         
         # Step A: สกัดชื่อรุ่น
         prompt_extract = f"""
@@ -82,90 +80,4 @@ def ai_analyze_and_deep_search(raw_title, raw_url):
         ]
         """
         response_search = model.generate_content(prompt_search)
-        clean_json_text = response_search.text.replace("```json", "").replace("```", "").strip()
-        search_results = json.loads(clean_json_text)
-        
-        return clean_model_name, search_results
-
-    except Exception as e:
-        st.error(f"❌ ระบบ AI ขัดข้องชั่วคราว: {e}")
-        return None, []
-
-# --- 3. ฟังก์ชันส่งข้อความ LINE ---
-def send_line_alert(model_name, best_deal):
-    if not LINE_TOKEN:
-        return False
-    
-    msg = f"\n🔥 [Price Hunter Pro] เจอโปรราคาดีที่สุดแล้ว!\n"
-    msg += f"📦 สินค้า: {model_name}\n"
-    msg += f"🏷️ ราคาต่ำสุด: {best_deal['price']:,} บาท\n"
-    msg += f"🏪 ร้าน: {best_deal['shop_name']} ({best_deal['platform']})\n"
-    msg += f"🔗 ลิงก์ตรงกดซื้อได้เลย:\n{best_deal['url']}"
-    
-    url = "https://api.line.me/v2/bot/message/broadcast"
-    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LINE_TOKEN}"}
-    payload = {"messages": [{"type": "text", "text": msg}]}
-    
-    res = requests.post(url, headers=headers, json=payload)
-    return res.status_code == 200
-
-# ================= UI STREAMLIT =================
-
-st.markdown('<p class="main-title">🏷️ Price Hunter Pro Dashboard</p>', unsafe_allow_html=True)
-st.markdown('<p class="sub-title">วางลิงก์สินค้า ➔ AI สกัดสเปกเป๊ะ ➔ Deep Search ล่าราคาถูกที่สุดข้ามแอป</p>', unsafe_allow_html=True)
-
-# 1. วางลิงก์
-st.subheader("1️⃣ วางลิงก์สินค้าที่เล็งไว้ (Shopee / Lazada / TikTok)")
-input_url = st.text_input("แปะ ลิงก์สินค้า ตรงนี้:", placeholder="https://shopee.co.th/product/...")
-
-if st.button("🔍 ดึงข้อมูลสินค้า & AI วิเคราะห์"):
-    if input_url:
-        with st.spinner("🤖 AI กำลังอ่านลิงก์ และวิเคราะห์สเปกสินค้า..."):
-            details = extract_product_details(input_url)
-            model_name, search_results = ai_analyze_and_deep_search(details['title'], input_url)
-            
-            if model_name and search_results:
-                st.session_state['preview'] = {
-                    "model_name": model_name,
-                    "search_results": search_results,
-                    "url": input_url
-                }
-                st.success("✅ AI สกัดข้อมูลและ Deep Search สำเร็จ!")
-    else:
-        st.warning("กรุณาวางลิงก์สินค้าก่อนครับ")
-
-st.divider()
-
-# 2. พรีวิว
-if 'preview' in st.session_state:
-    prev = st.session_state['preview']
-    st.subheader("2️⃣ ตรวจสอบความถูกต้อง & ผลลัพธ์ Deep Search")
-    
-    col1, col2 = st.columns([1, 2])
-    with col1:
-        st.info(f"**ชื่อรุ่นสกัดสากล:**\n### {prev['model_name']}")
-        
-        if st.button("❤️ ยืนยันเล็งอันนี้ไว้ (Add to Wishlist & Track Price)"):
-            st.session_state.wishlist.append(prev)
-            st.toast("บันทึกเข้ารายการเล็งไว้แล้ว!", icon="🎉")
-            
-            best_deal = min(prev['search_results'], key=lambda x: x['price'])
-            if send_line_alert(prev['model_name'], best_deal):
-                st.success("🔔 ส่งลิงก์ร้านถูกที่สุดเข้า LINE เรียบร้อยแล้ว!")
-
-    with col2:
-        st.write("🔎 **ผลการ Deep Search ล่าราคาข้ามแอปพลิเคชัน ณ ปัจจุบัน:**")
-        for item in prev['search_results']:
-            with st.container():
-                st.write(f"**[{item['platform']}]** {item['shop_name']} — **{item['price']:,} บาท** (⭐ {item['rating']})")
-                st.markdown(f"[👉 กดตรงนี้เพื่อไปยังหน้าร้านซื้อราคา {item['price']:,} บาท]({item['url']})")
-                st.divider()
-
-# 3. Wishlist
-st.subheader("📋 3️⃣ รายการสินค้าที่คุณกดไลก์ / เล็งไว้ติดตามราคา")
-if st.session_state.wishlist:
-    for idx, wish in enumerate(st.session_state.wishlist):
-        best = min(wish['search_results'], key=lambda x: x['price'])
-        st.write(f"**{idx+1}. {wish['model_name']}** — ราคาถูกที่สุดตอนนี้: **{best['price']:,} บาท** ({best['platform']})")
-else:
-    st.write("ยังไม่มีรายการที่เล็งไว้ แปะลิงก์ด้านบนแล้วกดไลก์ได้เลย!")
+        clean_json_text = response_search.text.replace("```json", "").replace("
