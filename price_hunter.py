@@ -3,112 +3,126 @@ import json
 import requests
 
 # -------------------------------------------------------------------
-# ฟังก์ชันดึงข้อมูลราคา (จำลองการดึงจาก Shopee / Lazada / TikTok)
+# 1. ฟังก์ชันดึงข้อมูลสินค้า (ตัวอย่างแบบครอบคลุม)
 # -------------------------------------------------------------------
 def fetch_marketplace_data(keyword):
-    print(f"🔍 กำลังค้นหาสินค้าคำว่า: '{keyword}'...")
+    print(f"🔍 [Search Engine] กำลังดึงข้อมูลสินค้าคำว่า: '{keyword}'...")
     
-    # ข้อมูลจำลองที่บอทหามาได้ (มีทั้งเครื่องจริง เคส และฟิล์มกระจก)
-    mock_scraped_data = [
-        {"platform": "Lazada", "title": f"Apple {keyword} (256GB) - Natural Titanium เครื่องแท้ประกันศูนย์", "price": 37900, "url": "https://lazada.co.th/item1"},
-        {"platform": "Shopee", "title": f"เคสกันกระแทกอย่างดี สำหรับ {keyword} ใส ไม่เหลือง", "price": 290, "url": "https://shopee.co.th/item2"},
-        {"platform": "TikTok Shop", "title": f"{keyword} 256GB เครื่อง TH มือ 1", "price": 38500, "url": "https://tiktok.com/item3"},
-        {"platform": "Shopee", "title": f"ฟิล์มกระจกโฟกัส กันรอย เต็มจอ {keyword}", "price": 150, "url": "https://shopee.co.th/item4"}
+    # ข้อมูลจำลองที่ดึงมาจาก E-commerce
+    mock_data = [
+        {"platform": "Lazada", "title": f"Apple {keyword} (256GB) - Natural Titanium เครื่องศูนย์ไทย", "price": 37900, "url": "https://www.lazada.co.th/"},
+        {"platform": "Shopee", "title": f"เคสกันกระแทกอย่างดี สำหรับ {keyword} ใส ไม่เหลือง", "price": 290, "url": "https://shopee.co.th/"},
+        {"platform": "TikTok Shop", "title": f"{keyword} 256GB TH มือ 1 ประกันศูนย์ 1 ปี", "price": 38500, "url": "https://www.tiktok.com/"},
+        {"platform": "Shopee", "title": f"ฟิล์มกระจกโฟกัส กันรอย เต็มจอ {keyword}", "price": 150, "url": "https://shopee.co.th/"}
     ]
-    return mock_scraped_data
-
+    return mock_data
 
 # -------------------------------------------------------------------
-# Step 2: ฟังก์ชัน AI Filter (ใช้ Gemini แยกแยะตัวสินค้าจริง)
+# 2. ฟังก์ชัน Gemini AI Filter (กรองเคส/ฟิล์มออก เหลือเฉพาะตัวเครื่องจริง)
 # -------------------------------------------------------------------
-def filter_with_ai(target_item, items_list):
-    """
-    ใช้ Gemini API เพื่อคัดกรองเฉพาะสินค้าจริง ตัดพวกเคส/ฟิล์ม/อุปกรณ์เสริมออก
-    """
+def filter_with_gemini(target_item, items_list):
     api_key = os.environ.get("GEMINI_API_KEY")
     
-    # ถ้ายังไม่ได้ใส่ API Key ให้ใช้วิธี Simple Rule Filter สำรองไปก่อน
     if not api_key:
-        print("⚠️ ไม่พบ GEMINI_API_KEY ในระบบ (จะใช้ระบบกรองคำเบื้องต้นแทน)")
-        filtered = []
-        for item in items_list:
-            title_lower = item['title'].lower()
-            # ถ้ามีคำว่า เคส หรือ ฟิล์ม ให้ข้ามไป
-            if "เคส" not in title_lower and "ฟิล์ม" not in title_lower and "case" not in title_lower:
-                filtered.append(item)
-        return filtered
+        print("⚠️ ไม่พบ GEMINI_API_KEY จะใช้ระบบกรองคำพื้นฐานแทน")
+        return [item for item in items_list if not any(x in item['title'].lower() for x in ["เคส", "ฟิล์ม", "case"])]
 
-    print("🤖 กำลังส่งข้อมูลให้ Gemini AI ช่วยวิเคราะห์และคัดกรองสินค้า...")
+    print("🤖 [AI Filter] ส่งข้อมูลให้ Gemini วิเคราะห์และคัดกรองเคส/อุปกรณ์เสริมออก...")
     
-    # เตรียม Prompt ส่งให้ Gemini
     prompt = f"""
-    คุณคือ AI ผู้เชี่ยวชาญด้าน E-commerce 
     เป้าหมายผู้ใช้ต้องการซื้อ: "{target_item}"
+    โปรดเลือกเฉพาะรายการที่เป็นตัวเครื่องจริงๆ เท่านั้น (ตัดเคส, ฟิล์ม, อุปกรณ์เสริม ออกทั้งหมด)
     
-    โปรดวิเคราะห์รายการสินค้าต่อไปนี้ แล้วตอบกลับเฉพาะรายการที่เป็นตัวเครื่องจริงเท่านั้น (ตัด เคส, ฟิล์ม, อุปกรณ์เสริม, อะแดปเตอร์ ออกทั้งหมด)
     รายการสินค้า:
     {json.dumps(items_list, ensure_ascii=False)}
     
-    ส่งผลลัพธ์กลับมาเป็นรูปแบบ JSON Array เฉพาะรายการที่ผ่านการคัดกรองแล้วเท่านั้น ไม่ต้องมีคำอธิบายเพิ่มเติม
+    ตอบกลับเฉพาะ JSON Array ของรายการที่ผ่านการคัดกรองแล้วเท่านั้น ไม่ต้องมีคำอธิบายอื่น
     """
 
     try:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
         headers = {'Content-Type': 'application/json'}
-        payload = {
-            "contents": [{"parts": [{"text": prompt}]}]
-        }
+        payload = {"contents": [{"parts": [{"text": prompt}]}]}
         
         response = requests.post(url, headers=headers, json=payload)
         res_data = response.json()
         
-        # แกะข้อมูล JSON จากตอบกลับของ AI
         ai_reply = res_data['candidates'][0]['content']['parts'][0]['text']
-        # ลบ markdown code block ออกถ้ามี
         clean_json = ai_reply.replace("```json", "").replace("```", "").strip()
         return json.loads(clean_json)
         
     except Exception as e:
-        print(f"❌ AI Analysis Error: {e}")
-        # ถ้า AI เกิดข้อผิดพลาด ให้ส่งคืนข้อมูลทั้งหมดไปก่อน
-        return items_list
-
+        print(f"❌ AI Error: {e}")
+        return [item for item in items_list if not any(x in item['title'].lower() for x in ["เคส", "ฟิล์ม", "case"])]
 
 # -------------------------------------------------------------------
-# ฟังก์ชันหลัก (Main Hunt Execution)
+# 3. ฟังก์ชันส่งข้อความแจ้งเตือนเข้า LINE (Messaging API)
+# -------------------------------------------------------------------
+def send_line_broadcast(message_text):
+    line_token = os.environ.get("LINE_NOTIFY_TOKEN")
+    
+    if not line_token:
+        print("⚠️ ไม่พบ LINE_NOTIFY_TOKEN ไม่สามารถส่งแจ้งเตือนได้")
+        return
+
+    print("🔔 [LINE System] กำลังส่งข้อความแจ้งเตือนเข้า LINE...")
+    
+    url = "https://api.line.me/v2/bot/message/broadcast"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {line_token}"
+    }
+    payload = {
+        "messages": [
+            {
+                "type": "text",
+                "text": message_text
+            }
+        ]
+    }
+    
+    response = requests.post(url, headers=headers, json=payload)
+    if response.status_code == 200:
+        print("✅ ส่งแจ้งเตือนเข้า LINE สำเร็จแล้ว!")
+    else:
+        print(f"❌ ส่ง LINE ไม่สำเร็จ (Code {response.status_code}): {response.text}")
+
+# -------------------------------------------------------------------
+# 4. ฟังก์ชันหลักสั่งทำงาน
 # -------------------------------------------------------------------
 def main():
     target_keyword = "iPhone 15 Pro Max 256GB"
     target_price = 38000
     
     print("=" * 50)
-    print(f"🎯 ภารกิจตามล่า: {target_keyword}")
-    print(f"💰 ราคาเป้าหมาย: {target_price:,} บาท")
+    print(f"🎯 ค้นหา: {target_keyword} | ราคาเป้าหมาย: {target_price:,} บาท")
     print("=" * 50)
     
     # 1. ดึงข้อมูล
     raw_items = fetch_marketplace_data(target_keyword)
-    print(f"\n📦 พบรายการค้นหาเบื้องต้น {len(raw_items)} รายการ")
     
     # 2. ให้ AI กรอง
-    valid_items = filter_with_ai(target_keyword, raw_items)
-    print(f"✅ AI คัดกรองเหลือตัวเครื่องจริง: {len(valid_items)} รายการ\n")
+    valid_items = filter_with_gemini(target_keyword, raw_items)
+    print(f"✅ คัดกรองเหลือเครื่องจริง: {len(valid_items)} รายการ\n")
     
-    # 3. เช็กราคาและแจ้งเตือน
-    deals_found = False
+    # 3. ตรวจสอบราคา และเตรียมข้อความส่ง LINE
+    good_deals = []
     for item in valid_items:
-        price = item['price']
-        status = "🔥 ถึงราคาเป้าหมายแล้ว!" if price <= target_price else "❌ ราคายังแพงกว่าเป้า"
-        print(f"📱 [{item['platform']}] {item['title']}")
-        print(f"   💵 ราคา: {price:,} บาท | สถานะ: {status}")
-        print(f"   🔗 ลิงก์: {item['url']}\n")
+        if item['price'] <= target_price:
+            good_deals.append(item)
+            
+    if good_deals:
+        msg = f"🔥 [Price Hunter] เจอนโปรราคาถูกกว่าเป้าแล้ว!\n"
+        msg += f"🎯 สินค้า: {target_keyword}\n"
+        msg += f"💰 ราคาเป้าหมาย: {target_price:,} บาท\n\n"
         
-        if price <= target_price:
-            deals_found = True
-
-    if deals_found:
-        print("🔔 [Notification System] เตรียมส่งแจ้งเตือนเข้า LINE...")
-        # (เราจะเขียนส่วนส่ง LINE ต่อใน Step ถัดไปครับ)
+        for deal in good_deals:
+            msg += f"📍 [{deal['platform']}] {deal['price']:,} บาท\n"
+            msg += f"🔗 ลิงก์: {deal['url']}\n\n"
+            
+        send_line_broadcast(msg)
+    else:
+        print("😔 ยังไม่มีร้านไหนทำราคาลงมาถึงเป้าหมาย")
 
 if __name__ == "__main__":
     main()
