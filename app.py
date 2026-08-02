@@ -1,8 +1,6 @@
 import streamlit as st
 import requests
 import json
-import urllib.parse
-import re
 
 # ตั้งค่าหน้าตาเว็บ
 st.set_page_config(page_title="Price Hunter Pro", page_icon="🏷️", layout="wide")
@@ -11,77 +9,66 @@ st.markdown("""
     <style>
     .main-title { font-size: 2.2rem; font-weight: bold; color: #ff4b4b; text-align: center; }
     .sub-title { font-size: 1.1rem; text-align: center; color: #666; margin-bottom: 2rem; }
+    .product-price { color: #00875a; font-size: 1.4rem; font-weight: bold; }
     </style>
 """, unsafe_allow_html=True)
 
 # อ่านค่า Secrets
-GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
+SERPAPI_KEY = st.secrets.get("SERPAPI_KEY", "")
 LINE_TOKEN = st.secrets.get("LINE_NOTIFY_TOKEN", "")
 
 if "wishlist" not in st.session_state:
     st.session_state.wishlist = []
 
-# --- 1. ฟังก์ชันสร้าง Search URL ตรง ---
-def generate_platform_search_urls(keyword):
-    encoded_query = urllib.parse.quote(keyword)
-    return {
-        "Shopee": f"https://shopee.co.th/search?keyword={encoded_query}",
-        "Lazada": f"https://www.lazada.co.th/catalog/?q={encoded_query}",
-        "TikTok Shop": f"https://www.tiktok.com/search?q={encoded_query}"
-    }
+# --- ฟังก์ชันดึงราคาจริงและรูปจริงผ่าน SerpAPI ---
+def fetch_real_shopping_data(keyword):
+    if not SERPAPI_KEY:
+        st.error("⚠️ ยังไม่ได้ใส่ SERPAPI_KEY ใน Secrets ครับ!")
+        return []
 
-# --- 2. ฟังก์ชันเรียก Gemini API ยิงตรงผ่าน REST (แก้ปัญหา 404 ถาวร) ---
-def ai_analyze_product(user_input):
-    if not GEMINI_API_KEY:
-        st.error("⚠️ ไม่พบ GEMINI_API_KEY ใน Secrets")
-        return user_input, "ไม่สามารถประเมินราคาได้"
-
-    # ใช้ Endpoint v1beta ตัวใหม่ล่าสุด
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
-    headers = {"Content-Type": "application/json"}
-    
-    prompt = f"""
-    วิเคราะห์ข้อความ/ชื่อสินค้านี้: '{user_input}'
-    1. สกัดเฉพาะ 'ยี่ห้อ รุ่น และสเปกหลัก' เป็นภาษาไทยหรืออังกฤษสากลที่กระชับ
-    2. ประเมินช่วงราคาตลาดในไทย ณ ปัจจุบัน
-    
-    ตอบกลับเป็น JSON รูปแบบนี้เท่านั้น:
-    {{
-        "clean_name": "ชื่อรุ่นที่สกัดแล้ว",
-        "price_range": "ช่วงราคาประเมิน เช่น 35,000 - 38,000 บาท"
-    }}
-    """
-    
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"response_mime_type": "application/json"}
+    url = "https://serpapi.com/search.json"
+    params = {
+        "engine": "google_shopping",
+        "q": keyword,
+        "location": "Thailand",
+        "hl": "th",
+        "gl": "th",
+        "api_key": SERPAPI_KEY
     }
 
     try:
-        response = requests.post(url, headers=headers, json=payload, timeout=15)
-        res_data = response.json()
+        response = requests.get(url, params=params, timeout=15)
+        data = response.json()
         
-        if 'candidates' in res_data and res_data['candidates']:
-            raw_text = res_data['candidates'][0]['content']['parts'][0]['text']
-            data = json.loads(raw_text)
-            return data.get("clean_name", user_input), data.get("price_range", "เช็กราคาจริงหน้าเว็บ")
-        else:
-            return user_input, "เช็กราคาจริงหน้าเว็บ"
-    except Exception as e:
-        return user_input, "เช็กราคาจริงหน้าเว็บ"
+        results = []
+        shopping_results = data.get("shopping_results", [])
 
-# --- 3. ฟังก์ชันส่ง LINE Notify ---
-def send_line_alert(model_name, search_urls, price_range):
+        # ดึง 6 รายการแรกที่เจอราคาจริงในไทย
+        for item in shopping_results[:6]:
+            results.append({
+                "title": item.get("title", keyword),
+                "price": item.get("price", "ไม่ระบุราคา"),
+                "source": item.get("source", "ร้านค้าออนไลน์"),
+                "link": item.get("link", "#"),
+                "thumbnail": item.get("thumbnail", "https://via.placeholder.com/150")
+            })
+
+        return results
+
+    except Exception as e:
+        st.error(f"❌ เกิดข้อผิดพลาดในการดึงข้อมูล: {e}")
+        return []
+
+# --- ฟังก์ชันส่ง LINE Notify ---
+def send_line_alert(product):
     if not LINE_TOKEN:
         return False
     
-    msg = f"\n📌 [Price Hunter Pro] บันทึกสินค้าที่คุณเล็งไว้แล้ว!\n"
-    msg += f"📦 สินค้า: {model_name}\n"
-    msg += f"🏷️ ช่วงราคาประเมิน: {price_range}\n\n"
-    msg += f"🔗 กดเช็กราคาโปรโมชันจริงล่าสุดได้ที่นี่:\n"
-    msg += f"• Shopee: {search_urls['Shopee']}\n"
-    msg += f"• Lazada: {search_urls['Lazada']}\n"
-    msg += f"• TikTok: {search_urls['TikTok Shop']}"
+    msg = f"\n🔥 [Price Hunter] บันทึกสินค้าติดตามราคาแล้ว!\n"
+    msg += f"📦 สินค้า: {product['title']}\n"
+    msg += f"🏷️ ราคาจริงปัจจุบัน: {product['price']}\n"
+    msg += f"🏪 ร้านค้า: {product['source']}\n"
+    msg += f"🔗 ลิงก์ตรงหน้าสินค้า:\n{product['link']}"
     
     url = "https://api.line.me/v2/bot/message/broadcast"
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LINE_TOKEN}"}
@@ -92,65 +79,76 @@ def send_line_alert(model_name, search_urls, price_range):
 
 # ================= UI STREAMLIT =================
 
-st.markdown('<p class="main-title">🏷️ Price Hunter Pro Dashboard</p>', unsafe_allow_html=True)
-st.markdown('<p class="sub-title">ค้นหาสินค้า ➔ AI สกัดสเปกเป๊ะ ➔ สร้างลิงก์ค้นหาตรงข้ามแอปพลิเคชัน</p>', unsafe_allow_html=True)
+st.markdown('<p class="main-title">🏷️ Price Hunter Pro (Real-Time Search)</p>', unsafe_allow_html=True)
+st.markdown('<p class="sub-title">ระบบค้นหาราคาจริง + รูปภาพจริง + ลิงก์ตรง ณ วินาทีนี้</p>', unsafe_allow_html=True)
 
 # 1. ค้นหา
-st.subheader("1️⃣ ค้นหาสินค้าที่เล็งไว้")
+st.subheader("1️⃣ พิมพ์ชื่อสินค้าที่ต้องการเช็กราคาจริง")
 user_input = st.text_input(
-    "พิมพ์ชื่อรุ่น / ยี่ห้อ สินค้าตรงนี้:",
-    placeholder="เช่น iPhone 17 Pro Max หรือ Anker Soundcore R60i NC"
+    "ชื่อสินค้า / รุ่น / ยี่ห้อ:",
+    placeholder="เช่น Anker Soundcore R60i NC หรือ iPhone 15 Pro Max"
 )
 
-if st.button("🔍 ดึงข้อมูลสินค้า & AI วิเคราะห์"):
+if st.button("🔍 ค้นหาราคาและรูปภาพจริง"):
     if user_input:
-        with st.spinner("🤖 AI กำลังวิเคราะห์สินค้า..."):
-            model_name, price_range = ai_analyze_product(user_input)
-            search_urls = generate_platform_search_urls(model_name)
-            
-            st.session_state['preview'] = {
-                "model_name": model_name,
-                "price_range": price_range,
-                "search_urls": search_urls
-            }
-            st.success("✅ AI สกัดข้อมูลและสร้างลิงก์สำเร็จ!")
+        with st.spinner("🌐 กำลังดึงข้อมูลราคาจริงจากหน้าร้านค้าออนไลน์..."):
+            real_data = fetch_real_shopping_data(user_input)
+            if real_data:
+                st.session_state['search_results'] = real_data
+                st.success(f"✅ ดึงราคาจริงสำเร็จ เจอทั้งหมด {len(real_data)} รายการ!")
+            else:
+                st.warning("ไม่พบข้อมูลสินค้า หรือ API Key มีปัญหา")
     else:
         st.warning("กรุณาพิมพ์ชื่อสินค้าก่อนครับ")
 
 st.divider()
 
-# 2. พรีวิว
-if 'preview' in st.session_state:
-    prev = st.session_state['preview']
-    st.subheader("2️⃣ ตรวจสอบความถูกต้อง & ทางไปเช็กราคา")
+# 2. ผลลัพธ์
+if 'search_results' in st.session_state:
+    st.subheader("2️⃣ ผลการเปรียบเทียบราคาจริงในตลาด ณ ตอนนี้")
     
-    col1, col2 = st.columns([1, 2])
+    results = st.session_state['search_results']
     
-    with col1:
-        st.info(f"**ชื่อรุ่นสกัดสากล:**\n### {prev['model_name']}")
-        st.write(f"🏷️ **ช่วงราคาประเมินตลาด:** {prev['price_range']}")
+    # แสดงผลเป็น Card Grid 2 คอลัมน์
+    for idx in range(0, len(results), 2):
+        col1, col2 = st.columns(2)
         
-        if st.button("❤️ เล็งอันนี้ไว้ (ส่งลิงก์เข้า LINE เพื่อตามต่อ)"):
-            st.session_state.wishlist.append(prev)
-            st.toast("บันทึกเข้ารายการเล็งไว้แล้ว!", icon="🎉")
-            
-            if send_line_alert(prev['model_name'], prev['search_urls'], prev['price_range']):
-                st.success("🔔 ส่งลิงก์ค้นหาข้ามแอปเข้า LINE เรียบร้อยแล้ว!")
-            else:
-                st.error("⚠️ ไม่สามารถส่ง LINE ได้ กรุณาเช็ก LINE_NOTIFY_TOKEN")
+        # สินค้าการ์ดที่ 1
+        with col1:
+            item = results[idx]
+            with st.container(border=True):
+                st.image(item['thumbnail'], width=150)
+                st.write(f"**{item['title']}**")
+                st.write(f"🏪 ร้านค้า: **{item['source']}**")
+                st.markdown(f"🏷️ ราคาจริง: <span class='product-price'>{item['price']}</span>", unsafe_unsafe_allow_html=True)
+                st.markdown(f"[👉 กดตรงนี้เพื่อไปยังหน้าร้านค้า]({item['link']})")
+                
+                if st.button(f"❤️ เล็งรายการนี้", key=f"btn_{idx}"):
+                    st.session_state.wishlist.append(item)
+                    st.toast("บันทึกเข้ารายการเรียบร้อย!", icon="🎉")
+                    send_line_alert(item)
 
-    with col2:
-        st.write("🔎 **ลิงก์ตรงไปหน้าค้นหาราคาจริง ณ ปัจจุบัน:**")
-        for platform, url_link in prev['search_urls'].items():
-            with st.container():
-                st.write(f"**[{platform}]**")
-                st.markdown(f"[👉 กดตรงนี้เพื่อดูราคาจริงบน {platform}]({url_link})")
-                st.divider()
+        # สินค้าการ์ดที่ 2 (ถ้ามี)
+        if idx + 1 < len(results):
+            with col2:
+                item2 = results[idx + 1]
+                with st.container(border=True):
+                    st.image(item2['thumbnail'], width=150)
+                    st.write(f"**{item2['title']}**")
+                    st.write(f"🏪 ร้านค้า: **{item2['source']}**")
+                    st.markdown(f"🏷️ ราคาจริง: <span class='product-price'>{item2['price']}</span>", unsafe_allow_html=True)
+                    st.markdown(f"[👉 กดตรงนี้เพื่อไปยังหน้าร้านค้า]({item2['link']})")
+                    
+                    if st.button(f"❤️ เล็งรายการนี้", key=f"btn_{idx+1}"):
+                        st.session_state.wishlist.append(item2)
+                        st.toast("บันทึกเข้ารายการเรียบร้อย!", icon="🎉")
+                        send_line_alert(item2)
 
 # 3. Wishlist
-st.subheader("📋 3️⃣ รายการสินค้าที่คุณเล็งไว้")
+st.divider()
+st.subheader("📋 3️⃣ รายการสินค้าที่คุณกดบันทึกไว้")
 if st.session_state.wishlist:
     for idx, wish in enumerate(st.session_state.wishlist):
-        st.write(f"**{idx+1}. {wish['model_name']}** ({wish['price_range']})")
+        st.write(f"**{idx+1}. {wish['title']}** — **{wish['price']}** (ร้านค้า: {wish['source']})")
 else:
-    st.write("ยังไม่มีรายการที่เล็งไว้ พิมพ์ชื่อสินค้าด้านบนเพื่อเริ่มใช้งานได้เลย!")
+    st.write("ยังไม่มีรายการที่เล็งไว้")
