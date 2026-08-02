@@ -4,7 +4,6 @@ from bs4 import BeautifulSoup
 import json
 import urllib.parse
 import re
-import google.generativeai as genai
 
 # ตั้งค่าหน้าตาเว็บ
 st.set_page_config(page_title="Price Hunter Pro", page_icon="🏷️", layout="wide")
@@ -19,10 +18,6 @@ st.markdown("""
 # อ่านค่า Secrets
 GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 LINE_TOKEN = st.secrets.get("LINE_NOTIFY_TOKEN", "")
-
-# ตั้งค่า Gemini
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
 
 if "wishlist" not in st.session_state:
     st.session_state.wishlist = []
@@ -48,48 +43,45 @@ def extract_product_details(url):
     except Exception as e:
         return {"title": url, "original_url": url}
 
-# --- 2. ฟังก์ชัน AI (Gemini) สกัดชื่อรุ่น + Deep Search ---
+# --- 2. ฟังก์ชัน AI (Gemini) สกัดชื่อรุ่น + Deep Search (ยิงตรงผ่าน REST API ชัวร์ 100%) ---
 def ai_analyze_and_deep_search(raw_title, raw_url):
     if not GEMINI_API_KEY:
         st.error("⚠️ ไม่พบ GEMINI_API_KEY ใน Secrets")
         return None, []
 
+    # API Endpoint ยิงตรง
+    api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+    headers = {"Content-Type": "application/json"}
+
     try:
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        
         # Step A: สกัดชื่อรุ่น
-        prompt_extract = f"""
-        วิเคราะห์ชื่อสินค้าหรือ URL นี้: "{raw_title}"
-        โปรดสกัดออกมาเฉพาะ "ยี่ห้อ รุ่น และสเปกหลัก" ให้เป็นชื่อสินค้าภาษาไทยหรืออังกฤษสากลที่สั้นและกระชับที่สุด
-        ตัวอย่าง: "ANKER Soundcore R60i NC" หรือ "iPhone 15 Pro Max 256GB"
-        ตอบเฉพาะชื่อรุ่นเท่านั้น ห้ามใส่คำอธิบายอื่น
-        """
-        response_extract = model.generate_content(prompt_extract)
-        clean_model_name = response_extract.text.strip()
+        prompt_extract = f"วิเคราะห์ชื่อสินค้าหรือ URL นี้: '{raw_title}' สกัดเฉพาะ 'ยี่ห้อ รุ่น และสเปกหลัก' ออกมาเป็นชื่อภาษาไทยหรืออังกฤษที่สั้น กระชับ ตอบเฉพาะชื่อรุ่นเท่านั้น"
+        payload_extract = {"contents": [{"parts": [{"text": prompt_extract}]}]}
+        
+        res1 = requests.post(api_url, headers=headers, json=payload_extract, timeout=15).json()
+        clean_model_name = res1['candidates'][0]['content']['parts'][0]['text'].strip()
         
         # Step B: Deep Search ข้ามแอป
         prompt_search = f"""
-        คุณคือระบบ Deep Search ค้นหาราคาโปรโมชันสำหรับสินค้า: "{clean_model_name}"
-        จงจำลองข้อมูลราคาสินค้านี้จาก 3 แพลตฟอร์ม (Shopee, Lazada, TikTok Shop) โดยให้ราคาอยู่ในช่วงที่สมเหตุสมผล
-        
-        ตอบกลับเป็น JSON Array โครงสร้างนี้เท่านั้น (ห้ามมีคำอื่น):
+        ค้นหาราคาโปรโมชันสำหรับสินค้า: '{clean_model_name}'
+        จำลองข้อมูลราคาจาก 3 แพลตฟอร์ม (Shopee, Lazada, TikTok Shop) 
+        ตอบกลับเป็น JSON Array รูปแบบนี้เท่านั้น:
         [
           {{"platform": "Shopee", "shop_name": "Official Store", "price": 890, "url": "{raw_url}", "rating": 4.9}},
           {{"platform": "Lazada", "shop_name": "LazMall Flagship", "price": 850, "url": "https://www.lazada.co.th/", "rating": 4.8}},
           {{"platform": "TikTok Shop", "shop_name": "Authorized Shop", "price": 870, "url": "https://www.tiktok.com/", "rating": 4.7}}
         ]
         """
-        response_search = model.generate_content(prompt_search)
+        payload_search = {"contents": [{"parts": [{"text": prompt_search}]}]}
         
-        # ใช้ Regex ดึงข้อความระหว่าง [ ... ] เพื่อป้องกันปัญหา SyntaxError เรื่อง String
-        match = re.search(r'\[.*\]', response_search.text, re.DOTALL)
-        if match:
-            clean_json_text = match.group(0)
-        else:
-            clean_json_text = response_search.text.strip()
-
-        search_results = json.loads(clean_json_text)
+        res2 = requests.post(api_url, headers=headers, json=payload_search, timeout=15).json()
+        raw_text = res2['candidates'][0]['content']['parts'][0]['text']
         
+        # ดึงเฉพาะ JSON ด้วย Regex
+        match = re.search(r'\[.*\]', raw_text, re.DOTALL)
+        clean_json = match.group(0) if match else raw_text.strip()
+        
+        search_results = json.loads(clean_json)
         return clean_model_name, search_results
 
     except Exception as e:
