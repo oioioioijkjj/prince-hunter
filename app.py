@@ -50,7 +50,10 @@ def fetch_real_shopping_data(keyword):
             if not raw_price:
                 # แปลงข้อความราคาเป็นตัวเลขไว้หาค่าต่ำสุด
                 price_str = re.sub(r'[^\d.]', '', str(item.get("price", "0")))
-                raw_price = float(price_str) if price_str else 0
+                try:
+                    raw_price = float(price_str) if price_str else 0
+                except ValueError:
+                    raw_price = 0
 
             results.append({
                 "title": item.get("title", keyword),
@@ -84,8 +87,11 @@ def send_line_alert_best_deal(keyword, best_deal, total_found):
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LINE_TOKEN}"}
     payload = {"messages": [{"type": "text", "text": msg}]}
     
-    res = requests.post(url, headers=headers, json=payload)
-    return res.status_code == 200
+    try:
+        res = requests.post(url, headers=headers, json=payload)
+        return res.status_code == 200
+    except Exception:
+        return False
 
 # ================= UI STREAMLIT =================
 
@@ -119,9 +125,9 @@ if 'search_results' in st.session_state and st.session_state['search_results']:
     results = st.session_state['search_results']
     keyword = st.session_state.get('current_keyword', 'สินค้าที่เลือก')
     
-    # หาร้านที่ถูกที่สุด (ร้านที่ num_price > 0 และต่ำที่สุด)
-    valid_prices = [x for x in results if x['num_price'] > 0]
-    best_deal = min(valid_prices, key=lambda x: x['num_price']) if valid_prices else results[0]
+    # ป้องกัน KeyError โดยใช้ .get()
+    valid_prices = [x for x in results if x.get('num_price', 0) > 0]
+    best_deal = min(valid_prices, key=lambda x: x.get('num_price', 0)) if valid_prices else results[0]
 
     # ส่วนหัวสำหรับกดเล็งทั้งตัวสินค้า
     st.subheader(f"2️⃣ ผลการเปรียบเทียบราคาของ: {keyword}")
@@ -129,7 +135,7 @@ if 'search_results' in st.session_state and st.session_state['search_results']:
     col_alert1, col_alert2 = st.columns([2, 1])
     with col_alert1:
         st.info(f"🏆 ร้านที่ขายถูกที่สุดตอนนี้คือ **{best_deal['source']}** ในราคา **{best_deal['price']}**")
-    with col2 if 'col2' in locals() else col_alert2:
+    with col_alert2:
         if st.button("❤️ เล็งสินค้านี้ (ติดตามร้านที่ถูกที่สุด)", use_container_width=True):
             wish_item = {
                 "keyword": keyword,
@@ -152,7 +158,6 @@ if 'search_results' in st.session_state and st.session_state['search_results']:
         with c1:
             item = results[idx]
             is_best = (item == best_deal)
-            border_color = "green" if is_best else "#ccc"
             
             with st.container(border=True):
                 if is_best:
@@ -163,7 +168,7 @@ if 'search_results' in st.session_state and st.session_state['search_results']:
                 price_class = "best-price" if is_best else "normal-price"
                 st.markdown(f"🏷️ ราคา: <span class='{price_class}'>{item['price']}</span>", unsafe_allow_html=True)
                 
-                # ปุ่มลิงก์ภายนอกแบบกดแล้วเปิดแท็บใหม่แน่นอน 100%
+                # ปุ่มลิงก์เปิดแท็บใหม่แน่นอน
                 st.link_button("👉 กดเพื่อไปยังหน้าร้านซื้อเลย", item['link'], use_container_width=True)
 
         # การ์ดที่ 2 (ถ้ามี)
