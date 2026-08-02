@@ -22,59 +22,61 @@ LINE_TOKEN = st.secrets.get("LINE_NOTIFY_TOKEN", "")
 if "wishlist" not in st.session_state:
     st.session_state.wishlist = []
 
-# --- 1. ฟังก์ชันดึงรายละเอียดสินค้าจาก URL ---
-def extract_product_details(url):
-    try:
-        decoded_url = urllib.parse.unquote(url)
-        url_parts = decoded_url.split('/')
-        possible_title = ""
-        for part in url_parts:
-            if "i." not in part and "product" not in part and len(part) > 10:
-                possible_title = part.replace("-", " ")
-                break
-                
-        if not possible_title:
-            possible_title = decoded_url
+# --- 1. ฟังก์ชันสกัดชื่อสินค้าเบื้องต้นจากลิงก์หรือข้อความ ---
+def parse_user_input(user_input):
+    cleaned = user_input.strip()
+    
+    # กรณีเป็น URL ให้พยายามถอดความหมายของ URL ออกมา
+    if cleaned.startswith("http://") or cleaned.startswith("https://"):
+        try:
+            decoded_url = urllib.parse.unquote(cleaned)
+            # ตัดพารามิเตอร์ส่วนเกินออก
+            clean_path = decoded_url.split('?')[0]
+            parts = clean_path.split('/')
+            
+            # ค้นหาส่วนที่เป็นชื่อสินค้า
+            possible_title = ""
+            for part in reversed(parts):
+                if len(part) > 5 and not part.startswith("i.") and "product" not in part:
+                    possible_title = part.replace("-", " ").replace("_", " ")
+                    break
+            
+            if possible_title:
+                return possible_title
+            return decoded_url
+        except Exception:
+            return cleaned
+            
+    # กรณีพิมพ์ชื่อสินค้ามาตรงๆ
+    return cleaned
 
-        return {
-            "title": possible_title[:100],
-            "original_url": url
-        }
-    except Exception as e:
-        return {"title": url, "original_url": url}
-
-# --- 2. ฟังก์ชัน AI (Gemini) สกัดชื่อรุ่น + Deep Search (ป้องกัน Error 'candidates') ---
-def ai_analyze_and_deep_search(raw_title, raw_url):
+# --- 2. ฟังก์ชัน AI (Gemini) สกัดชื่อรุ่น + Deep Search ---
+def ai_analyze_and_deep_search(raw_input, raw_url_or_text):
     if not GEMINI_API_KEY:
         st.error("⚠️ ไม่พบ GEMINI_API_KEY ใน Secrets")
         return None, []
 
-    # API Endpoint ยิงตรง
     api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
     headers = {"Content-Type": "application/json"}
 
-    # ทำความสะอาดข้อความ ป้องกันอักขระพิเศษใน URL รบกวน Prompt
-    clean_prompt_title = urllib.parse.unquote(raw_title).replace('"', '').replace("'", "")
-
     try:
-        # Step A: สกัดชื่อรุ่น
-        prompt_extract = f"วิเคราะห์ข้อความหรือชื่อสินค้านี้: '{clean_prompt_title}' สกัดเฉพาะ 'ยี่ห้อ รุ่น และสเปกหลัก' ออกมาเป็นชื่อภาษาไทยหรืออังกฤษที่สั้น กระชับ เช่น 'Anker Soundcore R60i NC' ตอบเฉพาะชื่อรุ่นเท่านั้น"
+        # Step A: สกัดชื่อรุ่นให้คลีนที่สุด
+        prompt_extract = f"วิเคราะห์ข้อความ/สินค้าต่อไปนี้: '{raw_input}' สกัดเฉพาะ 'ยี่ห้อ รุ่น และสเปกหลัก' ให้เป็นชื่อสินค้าสากลที่กระชับที่สุด เช่น 'Anker Soundcore R60i NC' หรือ 'iPhone 15 Pro Max 256GB' ตอบเฉพาะชื่อรุ่นเท่านั้น ห้ามใส่คำอธิบายอื่น"
         payload_extract = {"contents": [{"parts": [{"text": prompt_extract}]}]}
         
         res1_response = requests.post(api_url, headers=headers, json=payload_extract, timeout=15)
         res1 = res1_response.json()
         
-        # เช็คว่ามี candidates คืนค่ากลับมาหรือไม่
-        if 'candidates' not in res1 or not res1['candidates']:
-            st.error("⚠️ AI ไม่สามารถอ่านชื่อสินค้าจากลิงก์นี้ได้ กรุณาลองใช้ลิงก์สั้น หรือวางชื่อสินค้าตรงๆ")
-            return None, []
-            
-        clean_model_name = res1['candidates'][0]['content']['parts'][0]['text'].strip()
+        if 'candidates' in res1 and res1['candidates']:
+            clean_model_name = res1['candidates'][0]['content']['parts'][0]['text'].strip()
+        else:
+            # ถ้า AI สกัดไม่ได้ ให้ใช้ข้อความเบื้องต้นที่ดึงได้แทน
+            clean_model_name = raw_input[:60]
         
-        # Step B: Deep Search ข้ามแอป
+        # Step B: Deep Search ล่าราคาข้ามแอป
         prompt_search = f"""
         คุณคือระบบเปรียบเทียบราคาสินค้า ค้นหาราคาโปรโมชันสำหรับสินค้า: '{clean_model_name}'
-        จำลองข้อมูลราคาจาก 3 แพลตฟอร์ม (Shopee, Lazada, TikTok Shop) ให้ราคาสมเหตุสมผล
+        จำลองข้อมูลราคาจาก 3 แพลตฟอร์ม (Shopee, Lazada, TikTok Shop) ให้ราคาสมเหตุสมผลและสอดคล้องกัน
         ตอบกลับเป็น JSON Array รูปแบบนี้เท่านั้น (ห้ามใส่คำอธิบายอื่น):
         [
           {{"platform": "Shopee", "shop_name": "Official Store", "price": 890, "url": "https://shopee.co.th/", "rating": 4.9}},
@@ -93,15 +95,14 @@ def ai_analyze_and_deep_search(raw_title, raw_url):
 
         raw_text = res2['candidates'][0]['content']['parts'][0]['text']
         
-        # ดึงเฉพาะ JSON ด้วย Regex
         match = re.search(r'\[.*\]', raw_text, re.DOTALL)
         clean_json = match.group(0) if match else raw_text.strip()
         
         search_results = json.loads(clean_json)
         
-        # ใส่ URL ต้นทางกลับเข้าไปที่แพลตฟอร์มแรก
-        if search_results:
-            search_results[0]['url'] = raw_url
+        # ใส่ URL เดิมเข้าผลลัพธ์ถ้าเป็นลิงก์
+        if search_results and (raw_url_or_text.startswith("http://") or raw_url_or_text.startswith("https://")):
+            search_results[0]['url'] = raw_url_or_text
 
         return clean_model_name, search_results
 
@@ -130,27 +131,30 @@ def send_line_alert(model_name, best_deal):
 # ================= UI STREAMLIT =================
 
 st.markdown('<p class="main-title">🏷️ Price Hunter Pro Dashboard</p>', unsafe_allow_html=True)
-st.markdown('<p class="sub-title">วางลิงก์สินค้า ➔ AI สกัดสเปกเป๊ะ ➔ Deep Search ล่าราคาถูกที่สุดข้ามแอป</p>', unsafe_allow_html=True)
+st.markdown('<p class="sub-title">แปะลิงก์ หรือ พิมพ์ชื่อสินค้าตรงๆ ➔ AI สกัดสเปก ➔ ล่าราคาถูกที่สุดข้ามแอป</p>', unsafe_allow_html=True)
 
-# 1. วางลิงก์
-st.subheader("1️⃣ วางลิงก์สินค้าที่เล็งไว้ (Shopee / Lazada / TikTok)")
-input_url = st.text_input("แปะ ลิงก์สินค้า ตรงนี้:", placeholder="https://shopee.co.th/product/...")
+# 1. วางลิงก์หรือพิมพ์ชื่อสินค้า
+st.subheader("1️⃣ ค้นหาสินค้าที่เล็งไว้")
+user_input = st.text_input(
+    "วางลิงก์สินค้า หรือ พิมพ์ชื่อรุ่น/ยี่ห้อ ตรงนี้:",
+    placeholder="เช่น https://shopee.co.th/... หรือ Anker Soundcore R60i NC"
+)
 
 if st.button("🔍 ดึงข้อมูลสินค้า & AI วิเคราะห์"):
-    if input_url:
-        with st.spinner("🤖 AI กำลังอ่านลิงก์ และวิเคราะห์สเปกสินค้า..."):
-            details = extract_product_details(input_url)
-            model_name, search_results = ai_analyze_and_deep_search(details['title'], input_url)
+    if user_input:
+        with st.spinner("🤖 AI กำลังวิเคราะห์ข้อมูลสินค้า..."):
+            extracted_title = parse_user_input(user_input)
+            model_name, search_results = ai_analyze_and_deep_search(extracted_title, user_input)
             
             if model_name and search_results:
                 st.session_state['preview'] = {
                     "model_name": model_name,
                     "search_results": search_results,
-                    "url": input_url
+                    "url": user_input
                 }
-                st.success("✅ AI สกัดข้อมูลและ Deep Search สำเร็จ!")
+                st.success("✅ AI สกัดข้อมูลและเปรียบเทียบราคาสำเร็จ!")
     else:
-        st.warning("กรุณาวางลิงก์สินค้าก่อนครับ")
+        st.warning("กรุณาวางลิงก์หรือพิมพ์ชื่อสินค้าก่อนครับ")
 
 st.divider()
 
@@ -186,4 +190,4 @@ if st.session_state.wishlist:
         best = min(wish['search_results'], key=lambda x: x['price'])
         st.write(f"**{idx+1}. {wish['model_name']}** — ราคาถูกที่สุดตอนนี้: **{best['price']:,} บาท** ({best['platform']})")
 else:
-    st.write("ยังไม่มีรายการที่เล็งไว้ แปะลิงก์ด้านบนแล้วกดไลก์ได้เลย!")
+    st.write("ยังไม่มีรายการที่เล็งไว้ พิมพ์ชื่อหรือแปะลิงก์ด้านบนเพื่อเริ่มใช้งานได้เลย!")
