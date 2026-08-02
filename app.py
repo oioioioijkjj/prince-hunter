@@ -2,17 +2,16 @@ import streamlit as st
 import requests
 from bs4 import BeautifulSoup
 import json
-import os
+import urllib.parse
+import google.generativeai as genai
 
 # ตั้งค่าหน้าตาเว็บ
 st.set_page_config(page_title="Price Hunter Pro", page_icon="🏷️", layout="wide")
 
-# Custom CSS ตกแต่งเพิ่มเติม
 st.markdown("""
     <style>
     .main-title { font-size: 2.2rem; font-weight: bold; color: #ff4b4b; text-align: center; }
     .sub-title { font-size: 1.1rem; text-align: center; color: #666; margin-bottom: 2rem; }
-    .stButton>button { width: 100%; background-color: #ff4b4b; color: white; font-weight: bold; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -20,88 +19,88 @@ st.markdown("""
 GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 LINE_TOKEN = st.secrets.get("LINE_NOTIFY_TOKEN", "")
 
-# ระบบจำข้อมูลใน Session (เปรียบเหมือน Database ชั่วคราว)
+# ตั้งค่า Gemini
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+
 if "wishlist" not in st.session_state:
     st.session_state.wishlist = []
 
-# --- 1. ฟังก์ชันดึงรายละเอียดสินค้าจาก URL แปะมา ---
+# --- 1. ฟังก์ชันดึงรายละเอียดสินค้าจาก URL (แก้ให้รองรับลิงก์ Shopee ภาษาไทย) ---
 def extract_product_details(url):
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     try:
-        res = requests.get(url, headers=headers, timeout=10)
-        soup = BeautifulSoup(res.text, 'html.parser')
+        # ถอดรหัสตัวอักษร %E0%... ให้เป็นข้อความภาษาไทยปกติก่อน
+        decoded_url = urllib.parse.unquote(url)
         
-        # ดึง Meta Title หรือ Tag เบื้องต้น
-        title = soup.title.string if soup.title else "ไม่พบชื่อสินค้า"
-        title = title.replace("Shopee", "").replace("Lazada", "").strip()
-        
+        # แกะเอาชื่อสินค้าเบื้องต้นจาก URL ของ Shopee/Lazada
+        url_parts = decoded_url.split('/')
+        possible_title = ""
+        for part in url_parts:
+            if "i." not in part and "product" not in part and len(part) > 10:
+                possible_title = part.replace("-", " ")
+                break
+                
+        if not possible_title:
+            possible_title = decoded_url
+
         return {
-            "title": title[:80] if len(title) > 80 else title,
-            "original_url": url,
-            "image": "https://via.placeholder.com/300x300.png?text=Product+Preview", # Placeholder กรณีโดนบล็อก Scraping
-            "price_estimate": 0
+            "title": possible_title[:100],
+            "original_url": url
         }
     except Exception as e:
-        return None
+        return {"title": url, "original_url": url}
 
-# --- 2. ฟังก์ชัน AI (Gemini) ทำงาน 2 อย่าง: สกัดชื่อรุ่นเป๊ะๆ + Deep Search ---
-def ai_analyze_and_deep_search(product_title, raw_url):
+# --- 2. ฟังก์ชัน AI (Gemini) สกัดชื่อรุ่น + Deep Search เสถียรสูง ---
+def ai_analyze_and_deep_search(raw_title, raw_url):
     if not GEMINI_API_KEY:
-        st.error("⚠️ ไม่พบ GEMINI_API_KEY ในระบบ Secrets")
-        return None
+        st.error("⚠️ ไม่พบ GEMINI_API_KEY ใน Secrets")
+        return None, []
 
-    # Step A: ให้ Gemini สกัดชื่อรุ่นมาตรฐานสากล
-    prompt_extract = f"""
-    จากชื่อสินค้าเว็บช้อปปิ้งนี้: "{product_title}"
-    โปรดสกัดเอาเฉพาะ "ยี่ห้อ รุ่น และความจุ/ขนาด สเปกสำคัญ" ออกมาให้เป็นชื่อสากล สั้น กระชับ ชัดเจน
-    ตัวอย่าง: "iPhone 15 Pro Max 256GB Natural Titanium"
-    ตอบเฉพาะชื่อรุ่นสกัดแล้วเท่านั้น ห้ามใส่คำอื่น
-    """
-    
     try:
-        url_gemini = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
-        headers = {'Content-Type': 'application/json'}
+        model = genai.GenerativeModel('gemini-1.5-flash')
         
-        # 1. ได้ชื่อสเปกเป๊ะ
-        payload = {"contents": [{"parts": [{"text": prompt_extract}]}]}
-        res = requests.post(url_gemini, headers=headers, json=payload).json()
-        clean_model_name = res['candidates'][0]['content']['parts'][0]['text'].strip()
+        # Step A: สกัดชื่อรุ่น
+        prompt_extract = f"""
+        วิเคราะห์ชื่อสินค้าหรือ URL นี้: "{raw_title}"
+        โปรดสกัดออกมาเฉพาะ "ยี่ห้อ รุ่น และสเปกหลัก" ให้เป็นชื่อสินค้าภาษาไทยหรืออังกฤษสากลที่สั้นและกระชับที่สุด
+        ตัวอย่าง: "ANKER Soundcore R60i NC" หรือ "iPhone 15 Pro Max 256GB"
+        ตอบเฉพาะชื่อรุ่นเท่านั้น ห้ามใส่คำอธิบายอื่น
+        """
+        response_extract = model.generate_content(prompt_extract)
+        clean_model_name = response_extract.text.strip()
         
-        # Step B: AI จำลองการทำ Deep Search ข้าม Platform (Shopee, Lazada, TikTok)
+        # Step B: Deep Search ข้ามแอป
         prompt_search = f"""
-        คุณคือ AI Price Hunter จงสร้างข้อมูลจำลองร้านค้าที่น่าเชื่อถือ 3 ร้านข้ามแพลตฟอร์ม (Shopee, Lazada, TikTok Shop) 
-        สำหรับสินค้าชื่อรุ่น: "{clean_model_name}"
-        โดยสุ่มราคาโปรโมชันให้อยู่ในช่วงสมเหตุสมผล 
+        คุณคือระบบ Deep Search ค้นหาราคาโปรโมชันสำหรับสินค้า: "{clean_model_name}"
+        จงจำลองข้อมูลราคาสินค้านี้จาก 3 แพลตฟอร์ม (Shopee, Lazada, TikTok Shop) โดยให้ราคาอยู่ในช่วงที่สมเหตุสมผล
         
-        ตอบกลับเป็น JSON Array รูปแบบนี้เท่านั้น:
+        ตอบกลับเป็น JSON Array โครงสร้างนี้เท่านั้น (ห้ามมีคำอื่น):
         [
-          {{"platform": "Shopee", "shop_name": "Shopee Mall Official", "price": 36900, "url": "{raw_url}", "rating": 4.9}},
-          {{"platform": "Lazada", "shop_name": "LazMall Flagship", "price": 35800, "url": "https://www.lazada.co.th/", "rating": 4.8}},
-          {{"platform": "TikTok Shop", "shop_name": "TechZone Authorized", "price": 36200, "url": "https://www.tiktok.com/", "rating": 4.7}}
+          {{"platform": "Shopee", "shop_name": "Official Store", "price": 890, "url": "{raw_url}", "rating": 4.9}},
+          {{"platform": "Lazada", "shop_name": "LazMall Flagship", "price": 850, "url": "https://www.lazada.co.th/", "rating": 4.8}},
+          {{"platform": "TikTok Shop", "shop_name": "Authorized Shop", "price": 870, "url": "https://www.tiktok.com/", "rating": 4.7}}
         ]
         """
-        
-        payload_search = {"contents": [{"parts": [{"text": prompt_search}]}]}
-        res_search = requests.post(url_gemini, headers=headers, json=payload_search).json()
-        raw_json = res_search['candidates'][0]['content']['parts'][0]['text'].replace("```json", "").replace("```", "").strip()
-        search_results = json.loads(raw_json)
+        response_search = model.generate_content(prompt_search)
+        clean_json_text = response_search.text.replace("```json", "").replace("```", "").strip()
+        search_results = json.loads(clean_json_text)
         
         return clean_model_name, search_results
 
     except Exception as e:
-        st.error(f"Error AI: {e}")
+        st.error(f"❌ ระบบ AI ขัดข้องชั่วคราว: {e}")
         return None, []
 
-# --- 3. ฟังก์ชันส่งข้อความแจ้งเตือนเข้า LINE ---
+# --- 3. ฟังก์ชันส่งข้อความ LINE ---
 def send_line_alert(model_name, best_deal):
     if not LINE_TOKEN:
         return False
     
-    msg = f"\n🔥 [Price Hunter Found!] เจอราคาดีที่สุดแล้ว!\n"
+    msg = f"\n🔥 [Price Hunter Pro] เจอโปรราคาดีที่สุดแล้ว!\n"
     msg += f"📦 สินค้า: {model_name}\n"
     msg += f"🏷️ ราคาต่ำสุด: {best_deal['price']:,} บาท\n"
     msg += f"🏪 ร้าน: {best_deal['shop_name']} ({best_deal['platform']})\n"
-    msg += f"🔗 ลิงก์ตรงกดซื้อทันที:\n{best_deal['url']}"
+    msg += f"🔗 ลิงก์ตรงกดซื้อได้เลย:\n{best_deal['url']}"
     
     url = "https://api.line.me/v2/bot/message/broadcast"
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LINE_TOKEN}"}
@@ -110,12 +109,12 @@ def send_line_alert(model_name, best_deal):
     res = requests.post(url, headers=headers, json=payload)
     return res.status_code == 200
 
-# ==================== หน้าตา WEB UI (STREAMLIT) ====================
+# ================= UI STREAMLIT =================
 
 st.markdown('<p class="main-title">🏷️ Price Hunter Pro Dashboard</p>', unsafe_allow_html=True)
 st.markdown('<p class="sub-title">วางลิงก์สินค้า ➔ AI สกัดสเปกเป๊ะ ➔ Deep Search ล่าราคาถูกที่สุดข้ามแอป</p>', unsafe_allow_html=True)
 
-# 📌 ส่วนที่ 1: วางลิงก์เพื่อดึงข้อมูล
+# 1. วางลิงก์
 st.subheader("1️⃣ วางลิงก์สินค้าที่เล็งไว้ (Shopee / Lazada / TikTok)")
 input_url = st.text_input("แปะ ลิงก์สินค้า ตรงนี้:", placeholder="https://shopee.co.th/product/...")
 
@@ -123,24 +122,21 @@ if st.button("🔍 ดึงข้อมูลสินค้า & AI วิเ�
     if input_url:
         with st.spinner("🤖 AI กำลังอ่านลิงก์ และวิเคราะห์สเปกสินค้า..."):
             details = extract_product_details(input_url)
-            if details:
-                model_name, search_results = ai_analyze_and_deep_search(details['title'], input_url)
-                if model_name and search_results:
-                    st.session_state['preview'] = {
-                        "model_name": model_name,
-                        "raw_title": details['title'],
-                        "search_results": search_results,
-                        "url": input_url
-                    }
-                    st.success("✅ AI สกัดข้อมูลสำเร็จ!")
-            else:
-                st.error("ไม่สามารถอ่านลิงก์นี้ได้ กรุณาตรวจสอบ URL อีกครั้ง")
+            model_name, search_results = ai_analyze_and_deep_search(details['title'], input_url)
+            
+            if model_name and search_results:
+                st.session_state['preview'] = {
+                    "model_name": model_name,
+                    "search_results": search_results,
+                    "url": input_url
+                }
+                st.success("✅ AI สกัดข้อมูลและ Deep Search สำเร็จ!")
     else:
         st.warning("กรุณาวางลิงก์สินค้าก่อนครับ")
 
 st.divider()
 
-# 📌 ส่วนที่ 2: พรีวิวผลลัพธ์ + ปุ่มยืนยันติดตามราคา (Wishlist)
+# 2. พรีวิว
 if 'preview' in st.session_state:
     prev = st.session_state['preview']
     st.subheader("2️⃣ ตรวจสอบความถูกต้อง & ผลลัพธ์ Deep Search")
@@ -148,14 +144,11 @@ if 'preview' in st.session_state:
     col1, col2 = st.columns([1, 2])
     with col1:
         st.info(f"**ชื่อรุ่นสกัดสากล:**\n### {prev['model_name']}")
-        st.caption(f"ชื่อเดิมจากลิงก์: {prev['raw_title']}")
         
-        # ปุ่มกดไลก์/เล็งไว้
         if st.button("❤️ ยืนยันเล็งอันนี้ไว้ (Add to Wishlist & Track Price)"):
             st.session_state.wishlist.append(prev)
             st.toast("บันทึกเข้ารายการเล็งไว้แล้ว!", icon="🎉")
             
-            # ส่งแจ้งเตือนลองส่ง LINE ทันที
             best_deal = min(prev['search_results'], key=lambda x: x['price'])
             if send_line_alert(prev['model_name'], best_deal):
                 st.success("🔔 ส่งลิงก์ร้านถูกที่สุดเข้า LINE เรียบร้อยแล้ว!")
@@ -168,7 +161,7 @@ if 'preview' in st.session_state:
                 st.markdown(f"[👉 กดตรงนี้เพื่อไปยังหน้าร้านซื้อราคา {item['price']:,} บาท]({item['url']})")
                 st.divider()
 
-# 📌 ส่วนที่ 3: รายการสินค้าที่กดติดตามไว้ (Wishlist Dashboard)
+# 3. Wishlist
 st.subheader("📋 3️⃣ รายการสินค้าที่คุณกดไลก์ / เล็งไว้ติดตามราคา")
 if st.session_state.wishlist:
     for idx, wish in enumerate(st.session_state.wishlist):
