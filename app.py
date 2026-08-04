@@ -23,7 +23,7 @@ LINE_TOKEN = st.secrets.get("LINE_NOTIFY_TOKEN", "")
 if "wishlist" not in st.session_state:
     st.session_state.wishlist = []
 
-# --- ฟังก์ชันดึงเฉพาะชื่อร้านค้า และ ราคาจริง ---
+# --- ฟังก์ชันดึงเฉพาะชื่อร้านค้า ราคา และลิงก์พิกัดจริง ---
 def fetch_real_shopping_data(keyword):
     if not SERPAPI_KEY:
         st.error("⚠️ ยังไม่ได้ใส่ SERPAPI_KEY ใน Secrets ครับ!")
@@ -46,7 +46,7 @@ def fetch_real_shopping_data(keyword):
         results = []
         shopping_results = data.get("shopping_results", [])
 
-        for item in shopping_results[:10]:
+        for item in shopping_results[:8]:
             raw_price = item.get("extracted_price", 0)
             if not raw_price:
                 price_str = re.sub(r'[^\d.]', '', str(item.get("price", "0")))
@@ -60,6 +60,7 @@ def fetch_real_shopping_data(keyword):
                 "price": item.get("price", "ไม่ระบุราคา"),
                 "num_price": raw_price,
                 "source": item.get("source", "ไม่ระบุชื่อร้าน"),
+                "link": item.get("link", "#"),
                 "thumbnail": item.get("thumbnail", "https://via.placeholder.com/150")
             })
 
@@ -69,21 +70,22 @@ def fetch_real_shopping_data(keyword):
         st.error(f"❌ เกิดข้อผิดพลาดในการดึงข้อมูล: {e}")
         return []
 
-# --- ฟังก์ชันส่ง LINE แจ้งเตือนรายการสรุปราคา ---
-def send_line_alert_best_deal(keyword, best_deal, all_results):
+# --- ฟังก์ชันส่ง LINE แจ้งเตือน: สรุปร้านค้าทั้งหมด + ลิงก์พิกัดร้าน ---
+def send_line_alert_all_shops(keyword, best_deal, all_results):
     if not LINE_TOKEN:
         return False
     
-    msg = f"\n🎯 [Price Hunter] บันทึกเล็งติดตามสินค้าแล้ว!\n"
-    msg += f"📦 สินค้า: {keyword}\n"
+    msg = f"🎯 [สรุปรายงานราคา] {keyword}\n"
     msg += f"--------------------------------\n"
-    msg += f"🏆 ร้านที่ขายถูกสุด: {best_deal['source']}\n"
-    msg += f"🏷️ ราคาต่ำสุด: {best_deal['price']}\n"
+    msg += f"🏆 ถูกที่สุด: {best_deal['source']} ({best_deal['price']})\n"
+    msg += f"📍 ลิงก์ร้านถูกสุด:\n{best_deal['link']}\n"
     msg += f"--------------------------------\n"
-    msg += f"📊 สรุปร้านค้าอื่นที่พบ:\n"
+    msg += f"📊 รายการร้านทั้งหมดที่หาเจอ:\n\n"
     
-    for item in all_results[:5]:
-        msg += f"• {item['source']}: {item['price']}\n"
+    for idx, item in enumerate(all_results[:5]):
+        msg += f"{idx+1}. {item['source']}\n"
+        msg += f"   🏷️ ราคา: {item['price']}\n"
+        msg += f"   🔗 พิกัด: {item['link']}\n\n"
     
     url = "https://api.line.me/v2/bot/message/broadcast"
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LINE_TOKEN}"}
@@ -98,7 +100,7 @@ def send_line_alert_best_deal(keyword, best_deal, all_results):
 # ================= UI STREAMLIT =================
 
 st.markdown('<p class="main-title">🏷️ Price Hunter Pro (Price Comparison)</p>', unsafe_allow_html=True)
-st.markdown('<p class="sub-title">เปรียบเทียบราคาแต่ละร้านค้า ➔ หาร้านที่ถูกที่สุด ➔ ส่งสรุปเข้า LINE</p>', unsafe_allow_html=True)
+st.markdown('<p class="sub-title">เปรียบเทียบราคาแต่ละร้านค้า ➔ ส่งสรุปร้านค้าและพิกัดลิงก์เข้า LINE</p>', unsafe_allow_html=True)
 
 # 1. ค้นหา
 st.subheader("1️⃣ ค้นหาชื่อสินค้าที่ต้องการเช็กราคาตามร้านค้า")
@@ -136,7 +138,7 @@ if 'search_results' in st.session_state and st.session_state['search_results']:
     with col_alert1:
         st.info(f"🏆 ร้านที่ขายถูกที่สุดในระบบขณะนี้: **{best_deal['source']}** ราคา **{best_deal['price']}**")
     with col_alert2:
-        if st.button("❤️ เล็งสินค้านี้ (ส่งสรุปราคาทุกร้านเข้า LINE)", use_container_width=True):
+        if st.button("📲 เล็งสินค้านี้ (ส่งรายการร้าน+พิกัดลิงก์เข้า LINE)", use_container_width=True):
             wish_item = {
                 "keyword": keyword,
                 "best_deal": best_deal,
@@ -144,13 +146,11 @@ if 'search_results' in st.session_state and st.session_state['search_results']:
             }
             st.session_state.wishlist.append(wish_item)
             st.toast("บันทึกสินค้านี้เข้า Wishlist แล้ว!", icon="🎉")
-            if send_line_alert_best_deal(keyword, best_deal, results):
-                st.success("🔔 ส่งสรุปราคาเข้า LINE เรียบร้อยแล้ว!")
+            if send_line_alert_all_shops(keyword, best_deal, results):
+                st.success("🔔 ส่งรายการร้าน+พิกัดลิงก์เข้า LINE เรียบร้อยแล้ว!")
 
     st.write("---")
-    
-    # แสดงตารางเปรียบเทียบราคาเรียบหรู
-    st.write("📊 **ตารางสรุปราคาแต่ละร้านค้า (เรียงจากทุกแหล่งที่พบ):**")
+    st.write("📊 **รายการร้านค้าที่พบทั้งหมด:**")
     
     for idx in range(0, len(results), 2):
         c1, c2 = st.columns(2)
